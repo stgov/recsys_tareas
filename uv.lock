@@ -2048,10 +2048,14 @@ dependencies = [
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "pandas" },
-    { name = "pyrefly" },
-    { name = "ruff" },
     { name = "seaborn" },
     { name = "surprise" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pyrefly" },
+    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -2062,10 +2066,14 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.11.1" },
     { name = "numpy", specifier = ">=2.5.2" },
     { name = "pandas", specifier = ">=3.0.5" },
-    { name = "pyrefly", specifier = ">=1.2.0" },
-    { name = "ruff", specifier = ">=0.16.4" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "surprise", specifier = ">=0.1" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pyrefly", specifier = ">=1.1.1" },
+    { name = "ruff", specifier = ">=0.15.19" },
 ]
 
 [[package]]

@@ -11,8 +11,23 @@ dependencies = [
     "matplotlib>=3.11.1",
     "numpy>=2.5.2",
     "pandas>=3.0.5",
-    "pyrefly>=1.2.0",
-    "ruff>=0.16.4",
     "seaborn>=0.13.2",
     "surprise>=0.1",
 ]
+
+[dependency-groups]
+dev = [
+    "pyrefly>=1.1.1",
+    "ruff>=0.15.19",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "RUF"]
+
+[tool.pyrefly]
+project-includes = ["**/*.py"]
+project-excludes = [".venv/**"]
