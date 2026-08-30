@@ -1,215 +1,167 @@
-"""utils.py
-
-Módulo de utilidades para evaluación de modelos de recomendación con Surprise.
-Calcula métricas de predicción (RMSE) y de ranking / catálogo (Recall@k,
-NDCG@k, MAP@k, Diversity, Novelty).
-
-Versión optimizada:
-- Negative sampling en la generación de Top-N (evita puntuar todo el catálogo
-  por usuario, que es el cuello de botella real con modelos KNN).
-- Paralelización por usuario con joblib (ya es dependencia de surprise).
-- Reemplazo de test_df.iterrows() por operaciones vectorizadas/groupby.
-- Eliminado código muerto (user_ratings no se usaba).
-"""
-
-import math
-from collections import defaultdict
-
 import numpy as np
-import numpy.typing as npt
 import pandas as pd
-import surprise
-from joblib import Parallel, delayed
-from surprise import accuracy
-
-# En este dataset los ids de usuario e ítem son siempre enteros
-UserId = int
-ItemId = int
-
-
-def _predict_for_user(
-    model: surprise.AlgoBase,
-    user_id: UserId,
-    candidates: npt.NDArray,
-    n: int,
-) -> tuple[UserId, list[ItemId]]:
-    """Genera las Top-N predicciones para un único usuario. Aislado en su
-
-    propia función para poder paralelizar con joblib.
-    """
-    preds = [model.predict(user_id, i, verbose=False) for i in candidates]
-    preds.sort(key=lambda x: x.est, reverse=True)
-    return user_id, [p.iid for p in preds[:n]]
-
-
-def get_top_n_recommendations(
-    model: surprise.AlgoBase,
-    trainset: surprise.Trainset,
-    test_df: pd.DataFrame,
-    all_items: list[ItemId],
-    n: int = 10,
-    user_col: str = "user_id",
-    item_col: str = "recipe_id",
-    n_negatives: int | None = 200,
-    n_jobs: int = -1,
-    seed: int = 42,
-) -> dict[UserId, list[ItemId]]:
-    """Genera las Top-N recomendaciones predichas para cada usuario en test
-
-    que no hayan sido vistas en el conjunto de entrenamiento.
-
-    Parameters
-    ----------
-    n_negatives : int or None
-        Si se especifica, en vez de puntuar TODO el catálogo no visto para
-        cada usuario, se muestrea un subconjunto de `n_negatives` ítems
-        (negative sampling). Es el enfoque estándar en evaluación de
-        recomendadores y reduce drásticamente el costo computacional sin
-        afectar mayormente el ranking relativo entre modelos. Poner None
-        para el comportamiento original (evaluar todo el catálogo).
-    n_jobs : int
-        Núcleos a usar en la paralelización por usuario (-1 = todos).
-    """
-    rng = np.random.default_rng(seed)
-    all_items_arr = np.array(all_items)
-
-    user_seen: dict[UserId, set[ItemId]] = defaultdict(set)
-    for user_id, item_id, _ in trainset.all_ratings():
-        raw_u = trainset.to_raw_uid(user_id)
-        raw_i = trainset.to_raw_iid(item_id)
-        user_seen[raw_u].add(raw_i)
-
-    test_users = test_df[user_col].unique()
-
-    def build_candidates(u: UserId) -> npt.NDArray:
-        seen = user_seen.get(u, set())
-        unseen = all_items_arr[[item_id not in seen for item_id in all_items_arr]]
-        if unseen.size == 0:
-            unseen = all_items_arr
-        if n_negatives is not None and unseen.size > n_negatives:
-            unseen = rng.choice(unseen, size=n_negatives, replace=False)
-        return unseen
-
-    results: list[tuple[UserId, list[ItemId]]] = Parallel(n_jobs=n_jobs)(
-        delayed(_predict_for_user)(model, u, build_candidates(u), n) for u in test_users
-    )
-
-    return dict(results)
+from scipy.sparse import csr_matrix
+from surprise import AlgoBase, accuracy
 
 
 def calculate_metrics(
-    model: surprise.AlgoBase,
-    trainset: surprise.Trainset,
-    testset: list[tuple[UserId, ItemId, float]],
-    train_df: pd.DataFrame,
-    test_df: pd.DataFrame,
+    *,
+    model: AlgoBase,
+    testset: list[tuple],
     k: int = 10,
-    threshold: float = 4.0,
-    user_col: str = "user_id",
-    item_col: str = "recipe_id",
-    rating_col: str = "rating",
-    n_negatives: int | None = 200,
-    n_jobs: int = -1,
+    threshold: float = 3.5,
 ) -> dict[str, float]:
-    """Evalúa un modelo entrenado de Surprise retornando un diccionario con:
-
-    - RMSE
-    - Recall@k
-    - NDCG@k
-    - MAP@k
-    - Diversity
-    - Novelty
-    """
-    # 1. RMSE en testset
     predictions = model.test(testset)
-    rmse_val = float(accuracy.rmse(predictions, verbose=False))
+    rmse_val: float = float(accuracy.rmse(predictions, verbose=False))
 
-    # 2. Relevancias reales en Test (Ground Truth) - vectorizado con groupby
-    relevant_df = test_df.loc[test_df[rating_col] >= threshold]
-    user_relevant: dict[UserId, set[ItemId]] = (
-        relevant_df.groupby(user_col)[item_col].apply(set).to_dict()
+    user_raw = [pred.uid for pred in predictions]
+    item_raw = [pred.iid for pred in predictions]
+    true_r = np.array([pred.r_ui for pred in predictions], dtype=np.float32)
+    est_r = np.array([pred.est for pred in predictions], dtype=np.float32)
+
+    unique_users, user_indices = np.unique(user_raw, return_inverse=True)
+    unique_items, item_indices = np.unique(item_raw, return_inverse=True)
+
+    n_users = len(unique_users)
+    n_items = len(unique_items)
+
+    relevant_mask = (true_r >= threshold).astype(np.int8)
+    ground_truth_sparse = csr_matrix(
+        (relevant_mask, (user_indices, item_indices)),
+        shape=(n_users, n_items),
+        dtype=np.int8,
     )
 
-    # 3. Probabilidades a priori para Novelty: P(i) = count(i) / total_interactions
-    total_interactions: int = len(train_df)
-    item_counts: dict[ItemId, int] = train_df[item_col].value_counts().to_dict()
-    item_novelty_score: dict[ItemId, float] = {
-        item: -math.log2(count / total_interactions)
-        for item, count in item_counts.items()
-        if count > 0
-    }
-    default_novelty: float = -math.log2(1 / (total_interactions + 1))
-
-    # 4. Top-N Recomendaciones (con negative sampling + paralelización)
-    all_items: list[ItemId] = list(
-        set(train_df[item_col].unique()).union(set(test_df[item_col].unique()))
+    # 4. Obtención del Top-K ordenado por usuario
+    # Ordenar primero y luego tomar los top-k por usuario con cumcount (100% vectorizado)
+    df_preds = pd.DataFrame(
+        {
+            "user_idx": user_indices,
+            "item_idx": item_indices,
+            "est_r": est_r,
+        }
     )
-    top_n = get_top_n_recommendations(
-        model,
-        trainset,
-        test_df,
-        all_items,
-        n=k,
-        user_col=user_col,
-        item_col=item_col,
-        n_negatives=n_negatives,
-        n_jobs=n_jobs,
+    df_sorted = df_preds.sort_values(by=["user_idx", "est_r"], ascending=[True, False])
+    df_sorted["rank"] = df_sorted.groupby("user_idx").cumcount()
+    top_k_df = df_sorted[df_sorted["rank"] < k].copy().reset_index(drop=True)
+
+    # 5. Evaluar si cada ítem en el Top-K es relevante
+    gt_array = ground_truth_sparse.toarray()
+    top_k_df["is_rel"] = gt_array[top_k_df["user_idx"].values, top_k_df["item_idx"].values]
+
+    # 6. Cálculo de Precision@K, Recall@K, MAP@K y NDCG@K por usuario
+    # Descuento logarítmico para rankings (posición 1-indexed: rank + 1)
+    ranks = top_k_df["rank"].values + 1
+    top_k_df["discount"] = 1.0 / np.log2(ranks + 1)
+    top_k_df["dcg_contrib"] = top_k_df["is_rel"] * top_k_df["discount"]
+
+    # Precisión acumulada en cada posición para Average Precision (AP)
+    top_k_df["cum_rel"] = top_k_df.groupby("user_idx")["is_rel"].cumsum()
+    top_k_df["prec_at_r"] = top_k_df["cum_rel"] / ranks
+    top_k_df["ap_contrib"] = top_k_df["prec_at_r"] * top_k_df["is_rel"]
+
+    # Agregación por usuario
+    user_metrics = (
+        top_k_df.groupby("user_idx")
+        .agg(
+            hits=("is_rel", "sum"),
+            rec_k=("is_rel", "count"),
+            dcg=("dcg_contrib", "sum"),
+            ap_sum=("ap_contrib", "sum"),
+        )
+        .reindex(range(n_users), fill_value=0)
     )
 
-    # 5. Cálculo de métricas de ranking por usuario
-    recalls: list[float] = []
-    ndcgs: list[float] = []
-    maps: list[float] = []
-    novelties: list[float] = []
-    recommended_items_per_user: list[list[ItemId]] = []
+    # Total de ítems relevantes en ground truth por usuario
+    rel_per_user = np.asarray(ground_truth_sparse.sum(axis=1)).flatten()
 
-    for u, recs in top_n.items():
-        relevant = user_relevant.get(u, set())
-        recommended_items_per_user.append(recs)
+    # IDCG@K (DCG ideal con los ítems relevantes disponibles)
+    ideal_hits = np.minimum(rel_per_user, k)
+    discounts = 1.0 / np.log2(np.arange(1, k + 1) + 1)
+    cum_discounts = np.cumsum(discounts)
+    idcg = np.zeros(n_users, dtype=np.float64)
+    has_ideal = ideal_hits > 0
+    idcg[has_ideal] = cum_discounts[ideal_hits[has_ideal] - 1]
 
-        # Recall@k
-        if len(relevant) > 0:
-            hits = len(set(recs).intersection(relevant))
-            recalls.append(hits / len(relevant))
+    # Usuarios válidos para métricas (al menos 1 ítem relevante en el testset)
+    valid_users = rel_per_user > 0
+
+    precision_users = np.zeros(n_users)
+    recall_users = np.zeros(n_users)
+    map_users = np.zeros(n_users)
+    ndcg_users = np.zeros(n_users)
+
+    if np.any(valid_users):
+        precision_users[valid_users] = (
+            user_metrics.loc[valid_users, "hits"].values
+            / user_metrics.loc[valid_users, "rec_k"].values
+        )
+        recall_users[valid_users] = (
+            user_metrics.loc[valid_users, "hits"].values / rel_per_user[valid_users]
+        )
+        map_users[valid_users] = (
+            user_metrics.loc[valid_users, "ap_sum"].values / ideal_hits[valid_users]
+        )
+        ndcg_users[valid_users] = np.where(
+            idcg[valid_users] > 0,
+            user_metrics.loc[valid_users, "dcg"].values / idcg[valid_users],
+            0.0,
+        )
+
+    # 7. Novelty (Auto-información basada en la frecuencia de ítems en el catálogo de test)
+    item_counts = pd.Series(item_indices).value_counts()
+    item_probs = item_counts / len(item_indices)
+    item_self_info = -np.log2(item_probs)
+
+    top_k_novelty = top_k_df["item_idx"].map(item_self_info).mean() if len(top_k_df) > 0 else 0.0
+
+    # 8. Diversity (Similitud de Coseno intra-lista promedio usando perfiles Sparse)
+    # Matriz Ítem-Usuario dispersa normalizada para similitud de coseno
+    item_user_sparse = csr_matrix(
+        (
+            np.ones(len(item_indices), dtype=np.float32),
+            (item_indices, user_indices),
+        ),
+        shape=(n_items, n_users),
+    )
+    norms = np.asarray(np.sqrt(item_user_sparse.multiply(item_user_sparse).sum(axis=1))).flatten()
+    norms[norms == 0] = 1.0
+    item_user_norm = item_user_sparse.multiply(1.0 / norms[:, None]).tocsr()
+
+    user_diversities = []
+    for _, items in top_k_df.groupby("user_idx")["item_idx"]:
+        item_list = items.values
+        n_rec = len(item_list)
+        if n_rec > 1:
+            sub_mat = item_user_norm[item_list, :]
+            # Similitud coseno entre los ítems recomendados al usuario
+            sim_matrix = (sub_mat @ sub_mat.T).toarray()
+            # Promedio de similitudes fuera de la diagonal
+            upper_tri = sim_matrix[np.triu_indices(n_rec, k=1)]
+            user_diversities.append(1.0 - float(np.mean(upper_tri)))
         else:
-            recalls.append(0.0)
+            user_diversities.append(1.0)
 
-        # NDCG@k & MAP@k (relevancia binaria con threshold)
-        dcg = 0.0
-        running_hits = 0
-        ap_sum = 0.0
-
-        for rank, item in enumerate(recs, start=1):
-            if item in relevant:
-                dcg += 1.0 / math.log2(rank + 1)
-                running_hits += 1
-                ap_sum += running_hits / rank
-
-        # IDCG
-        ideal_hits = min(len(relevant), k)
-        idcg = sum(1.0 / math.log2(r + 1) for r in range(1, ideal_hits + 1))
-        ndcgs.append((dcg / idcg) if idcg > 0 else 0.0)
-        maps.append((ap_sum / ideal_hits) if ideal_hits > 0 else 0.0)
-
-        # Novelty por usuario
-        user_nov = [item_novelty_score.get(item, default_novelty) for item in recs]
-        if user_nov:
-            novelties.append(np.mean(user_nov))
-
-    # 6. Catalog Coverage / List Diversity (Cobertura Normalizada)
-    all_recs_flat = [item for sublist in recommended_items_per_user for item in sublist]
-    unique_recommended = len(set(all_recs_flat))
-    diversity_val = unique_recommended / len(all_items) if all_items else 0.0
-
-    # Normalizar Novelty para aproximación en escala 0-1
-    max_possible_novelty = -math.log2(1 / (total_interactions + 1))
-    avg_novelty_norm = float(np.mean(novelties) / max_possible_novelty) if novelties else 0.0
+    diversity_val = float(np.mean(user_diversities)) if user_diversities else 1.0
 
     return {
         "RMSE": round(rmse_val, 4),
-        f"Recall@{k}": round(float(np.mean(recalls)), 4),
-        f"NDCG@{k}": round(float(np.mean(ndcgs)), 4),
-        f"MAP@{k}": round(float(np.mean(maps)), 4),
+        f"Recall@{k}": round(
+            float(np.mean(recall_users[valid_users])) if np.any(valid_users) else 0.0,
+            4,
+        ),
+        f"Precision@{k}": round(
+            float(np.mean(precision_users[valid_users])) if np.any(valid_users) else 0.0,
+            4,
+        ),
+        f"NDCG@{k}": round(
+            float(np.mean(ndcg_users[valid_users])) if np.any(valid_users) else 0.0,
+            4,
+        ),
+        f"MAP@{k}": round(
+            float(np.mean(map_users[valid_users])) if np.any(valid_users) else 0.0,
+            4,
+        ),
         "Diversity": round(diversity_val, 4),
-        "Novelty": round(avg_novelty_norm, 4),
+        "Novelty": round(float(top_k_novelty), 4),
     }
