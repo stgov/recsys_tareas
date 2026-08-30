@@ -11,157 +11,133 @@ def calculate_metrics(
     k: int = 10,
     threshold: float = 3.5,
 ) -> dict[str, float]:
+
+    # 1. Predicción base
     predictions = model.test(testset)
-    rmse_val: float = float(accuracy.rmse(predictions, verbose=False))
+    rmse_val = float(accuracy.rmse(predictions, verbose=False))
 
-    user_raw = [pred.uid for pred in predictions]
-    item_raw = [pred.iid for pred in predictions]
-    true_r = np.array([pred.r_ui for pred in predictions], dtype=np.float32)
-    est_r = np.array([pred.est for pred in predictions], dtype=np.float32)
-
-    unique_users, user_indices = np.unique(user_raw, return_inverse=True)
-    unique_items, item_indices = np.unique(item_raw, return_inverse=True)
-
-    n_users = len(unique_users)
-    n_items = len(unique_items)
-
-    relevant_mask = (true_r >= threshold).astype(np.int8)
-    ground_truth_sparse = csr_matrix(
-        (relevant_mask, (user_indices, item_indices)),
-        shape=(n_users, n_items),
-        dtype=np.int8,
-    )
-
-    # 4. Obtención del Top-K ordenado por usuario
-    # Ordenar primero y luego tomar los top-k por usuario con cumcount (100% vectorizado)
+    # 2. Creación eficiente del DataFrame de resultados
     df_preds = pd.DataFrame(
-        {
-            "user_idx": user_indices,
-            "item_idx": item_indices,
-            "est_r": est_r,
-        }
+        [
+            {"uid": pred.uid, "iid": pred.iid, "est_r": float(pred.est), "true_r": float(pred.r_ui)}
+            for pred in predictions
+        ]
     )
-    df_sorted = df_preds.sort_values(by=["user_idx", "est_r"], ascending=[True, False])
-    df_sorted["rank"] = df_sorted.groupby("user_idx").cumcount()
-    top_k_df = df_sorted[df_sorted["rank"] < k].copy().reset_index(drop=True)
 
-    # 5. Evaluar si cada ítem en el Top-K es relevante
-    gt_array = ground_truth_sparse.toarray()
-    top_k_df["is_rel"] = gt_array[top_k_df["user_idx"].values, top_k_df["item_idx"].values]
+    # Identificar ítems relevantes en el ground truth
+    df_preds["is_rel"] = (df_preds["true_r"] >= threshold).astype(np.int8)
 
-    # 6. Cálculo de Precision@K, Recall@K, MAP@K y NDCG@K por usuario
-    # Descuento logarítmico para rankings (posición 1-indexed: rank + 1)
-    ranks = top_k_df["rank"].values + 1
-    top_k_df["discount"] = 1.0 / np.log2(ranks + 1)
+    # 3. Obtención del Top-K ordenado por usuario
+    df_sorted = df_preds.sort_values(by=["uid", "est_r"], ascending=[True, False])
+    df_sorted["rank"] = df_sorted.groupby("uid").cumcount() + 1
+    top_k_df = df_sorted[df_sorted["rank"] <= k].copy()
+
+    # 4. Cálculo de DCG y AP por ítem
+    top_k_df["discount"] = 1.0 / np.log2(top_k_df["rank"] + 1)
     top_k_df["dcg_contrib"] = top_k_df["is_rel"] * top_k_df["discount"]
 
-    # Precisión acumulada en cada posición para Average Precision (AP)
-    top_k_df["cum_rel"] = top_k_df.groupby("user_idx")["is_rel"].cumsum()
-    top_k_df["prec_at_r"] = top_k_df["cum_rel"] / ranks
+    top_k_df["cum_rel"] = top_k_df.groupby("uid")["is_rel"].cumsum()
+    top_k_df["prec_at_r"] = top_k_df["cum_rel"] / top_k_df["rank"]
     top_k_df["ap_contrib"] = top_k_df["prec_at_r"] * top_k_df["is_rel"]
 
-    # Agregación por usuario
-    user_metrics = (
-        top_k_df.groupby("user_idx")
-        .agg(
-            hits=("is_rel", "sum"),
-            rec_k=("is_rel", "count"),
-            dcg=("dcg_contrib", "sum"),
-            ap_sum=("ap_contrib", "sum"),
-        )
-        .reindex(range(n_users), fill_value=0)
+    # 5. Agregación de métricas a nivel de usuario
+    user_metrics = top_k_df.groupby("uid").agg(
+        hits=("is_rel", "sum"), dcg=("dcg_contrib", "sum"), ap_sum=("ap_contrib", "sum")
     )
 
-    # Total de ítems relevantes en ground truth por usuario
-    rel_per_user = np.asarray(ground_truth_sparse.sum(axis=1)).flatten()
+    # Conteo real de ítems relevantes por usuario en todo el testset
+    user_totals = df_preds.groupby("uid")["is_rel"].sum().rename("total_rel")
+    user_metrics = user_metrics.join(user_totals, how="right").fillna(0)
 
-    # IDCG@K (DCG ideal con los ítems relevantes disponibles)
-    ideal_hits = np.minimum(rel_per_user, k)
-    discounts = 1.0 / np.log2(np.arange(1, k + 1) + 1)
-    cum_discounts = np.cumsum(discounts)
-    idcg = np.zeros(n_users, dtype=np.float64)
-    has_ideal = ideal_hits > 0
-    idcg[has_ideal] = cum_discounts[ideal_hits[has_ideal] - 1]
+    # Filtrar solo usuarios que tengan al menos 1 ítem relevante para evaluar
+    valid_users_mask = user_metrics["total_rel"] > 0
+    valid_metrics = user_metrics[valid_users_mask].copy()
 
-    # Usuarios válidos para métricas (al menos 1 ítem relevante en el testset)
-    valid_users = rel_per_user > 0
+    if len(valid_metrics) > 0:
+        # Precision divide por K, Recall divide por los relevantes posibles
+        valid_metrics["precision"] = valid_metrics["hits"] / k
+        valid_metrics["recall"] = valid_metrics["hits"] / valid_metrics["total_rel"]
 
-    precision_users = np.zeros(n_users)
-    recall_users = np.zeros(n_users)
-    map_users = np.zeros(n_users)
-    ndcg_users = np.zeros(n_users)
+        # IDCG (vectorizado) para calcular NDCG
+        ideal_hits = np.minimum(valid_metrics["total_rel"].astype(int), k)
+        discounts = 1.0 / np.log2(np.arange(2, k + 2))
+        cum_idcg_pad = np.insert(np.cumsum(discounts), 0, 0.0)  # offset index 0
+        valid_metrics["idcg"] = cum_idcg_pad[ideal_hits]
 
-    if np.any(valid_users):
-        precision_users[valid_users] = (
-            user_metrics.loc[valid_users, "hits"].values
-            / user_metrics.loc[valid_users, "rec_k"].values
-        )
-        recall_users[valid_users] = (
-            user_metrics.loc[valid_users, "hits"].values / rel_per_user[valid_users]
-        )
-        map_users[valid_users] = (
-            user_metrics.loc[valid_users, "ap_sum"].values / ideal_hits[valid_users]
-        )
-        ndcg_users[valid_users] = np.where(
-            idcg[valid_users] > 0,
-            user_metrics.loc[valid_users, "dcg"].values / idcg[valid_users],
-            0.0,
+        valid_metrics["ndcg"] = np.where(
+            valid_metrics["idcg"] > 0, valid_metrics["dcg"] / valid_metrics["idcg"], 0.0
         )
 
-    # 7. Novelty (Auto-información basada en la frecuencia de ítems en el catálogo de test)
-    item_counts = pd.Series(item_indices).value_counts()
-    item_probs = item_counts / len(item_indices)
-    item_self_info = -np.log2(item_probs)
+        # MAP
+        valid_metrics["map"] = valid_metrics["ap_sum"] / ideal_hits
 
-    top_k_novelty = top_k_df["item_idx"].map(item_self_info).mean() if len(top_k_df) > 0 else 0.0
+        # Promedios finales
+        mean_precision = valid_metrics["precision"].mean()
+        mean_recall = valid_metrics["recall"].mean()
+        mean_ndcg = valid_metrics["ndcg"].mean()
+        mean_map = valid_metrics["map"].mean()
+    else:
+        mean_precision = mean_recall = mean_ndcg = mean_map = 0.0
 
-    # 8. Diversity (Similitud de Coseno intra-lista promedio usando perfiles Sparse)
-    # Matriz Ítem-Usuario dispersa normalizada para similitud de coseno
-    item_user_sparse = csr_matrix(
-        (
-            np.ones(len(item_indices), dtype=np.float32),
-            (item_indices, user_indices),
-        ),
-        shape=(n_items, n_users),
+    # 6. Novelty (basado en el modelo de entrenamiento, no en el testset)
+    trainset = model.trainset
+    n_train_ratings = trainset.n_ratings
+
+    # Mapeo de popularidad cruda
+    raw_to_count = {
+        trainset.to_raw_iid(inner_iid): len(ur_list) for inner_iid, ur_list in trainset.ir.items()
+    }
+
+    # Asignar 0.1 artificial a ítems desconocidos para evitar log(0)
+    top_k_df["train_count"] = top_k_df["iid"].map(raw_to_count).fillna(0.1)
+    top_k_df["prob"] = top_k_df["train_count"] / n_train_ratings
+    top_k_df["self_info"] = -np.log2(top_k_df["prob"])
+    novelty_val = top_k_df["self_info"].mean() if len(top_k_df) > 0 else 0.0
+
+    # 7. Diversity (Similitud del catálogo de Entrenamiento en Sparse)
+    rows, cols = [], []
+    for inner_iid, ur_list in trainset.ir.items():
+        for inner_uid, _ in ur_list:
+            rows.append(inner_iid)
+            cols.append(inner_uid)
+
+    train_sparse = csr_matrix(
+        (np.ones(len(rows), dtype=np.float32), (rows, cols)),
+        shape=(trainset.n_items, trainset.n_users),
     )
-    norms = np.asarray(np.sqrt(item_user_sparse.multiply(item_user_sparse).sum(axis=1))).flatten()
+
+    norms = np.asarray(np.sqrt(train_sparse.multiply(train_sparse).sum(axis=1))).flatten()
     norms[norms == 0] = 1.0
-    item_user_norm = item_user_sparse.multiply(1.0 / norms[:, None]).tocsr()
+    train_norm = train_sparse.multiply(1.0 / norms[:, None]).tocsr()
 
     user_diversities = []
-    for _, items in top_k_df.groupby("user_idx")["item_idx"]:
-        item_list = items.values
-        n_rec = len(item_list)
+    for uid, group in top_k_df.groupby("uid"):
+        # Convertir IDs crudos de test a IDs internos de train
+        inner_iids = [
+            trainset.to_inner_iid(raw)
+            for raw in group["iid"]
+            if trainset.knows_item(trainset.to_inner_iid(raw))
+            if raw in raw_to_count
+        ]
+
+        n_rec = len(inner_iids)
         if n_rec > 1:
-            sub_mat = item_user_norm[item_list, :]
-            # Similitud coseno entre los ítems recomendados al usuario
+            sub_mat = train_norm[inner_iids, :]
+            # El producto cruzado de KxK ítems es diminuto, toarray() aquí es seguro
             sim_matrix = (sub_mat @ sub_mat.T).toarray()
-            # Promedio de similitudes fuera de la diagonal
             upper_tri = sim_matrix[np.triu_indices(n_rec, k=1)]
             user_diversities.append(1.0 - float(np.mean(upper_tri)))
         else:
             user_diversities.append(1.0)
 
-    diversity_val = float(np.mean(user_diversities)) if user_diversities else 1.0
+    diversity_val = np.mean(user_diversities) if user_diversities else 1.0
 
     return {
         "RMSE": round(rmse_val, 4),
-        f"Recall@{k}": round(
-            float(np.mean(recall_users[valid_users])) if np.any(valid_users) else 0.0,
-            4,
-        ),
-        f"Precision@{k}": round(
-            float(np.mean(precision_users[valid_users])) if np.any(valid_users) else 0.0,
-            4,
-        ),
-        f"NDCG@{k}": round(
-            float(np.mean(ndcg_users[valid_users])) if np.any(valid_users) else 0.0,
-            4,
-        ),
-        f"MAP@{k}": round(
-            float(np.mean(map_users[valid_users])) if np.any(valid_users) else 0.0,
-            4,
-        ),
-        "Diversity": round(diversity_val, 4),
-        "Novelty": round(float(top_k_novelty), 4),
+        f"Recall@{k}": round(float(mean_recall), 4),
+        f"Precision@{k}": round(float(mean_precision), 4),
+        f"NDCG@{k}": round(float(mean_ndcg), 4),
+        f"MAP@{k}": round(float(mean_map), 4),
+        "Diversity": round(float(diversity_val), 4),
+        "Novelty": round(float(novelty_val), 4),
     }
