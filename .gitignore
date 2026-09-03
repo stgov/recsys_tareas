@@ -9,3 +9,6 @@ wheels/
 # Virtual environments
 .venv
 tarea_01/dataset
+
+*/figures
+*/results
