@@ -7,20 +7,24 @@ from surprise import AlgoBase, accuracy
 def calculate_metrics(
     *,
     model: AlgoBase,
-    testset: list[tuple],
+    testset_rating: list[tuple],
+    testset_ranking: list[tuple],
     k: int = 10,
     threshold: float = 3.5,
 ) -> dict[str, float]:
 
-    # 1. Predicción base
-    predictions = model.test(testset)
-    rmse_val = float(accuracy.rmse(predictions, verbose=False))
+    # 1. RMSE calculado ÚNICAMENTE con los datos reales observados
+    predictions_rating = model.test(testset_rating)
+    rmse_val = float(accuracy.rmse(predictions_rating, verbose=False))
+    mae_val = float(accuracy.mae(predictions_rating, verbose=False))
 
-    # 2. Creación eficiente del DataFrame de resultados
+    # 2. Ranking evaluado sobre candidatos + negativos
+    predictions_ranking = model.test(testset_ranking)
+
     df_preds = pd.DataFrame(
         [
             {"uid": pred.uid, "iid": pred.iid, "est_r": float(pred.est), "true_r": float(pred.r_ui)}
-            for pred in predictions
+            for pred in predictions_ranking
         ]
     )
 
@@ -45,33 +49,29 @@ def calculate_metrics(
         hits=("is_rel", "sum"), dcg=("dcg_contrib", "sum"), ap_sum=("ap_contrib", "sum")
     )
 
-    # Conteo real de ítems relevantes por usuario en todo el testset
+    # Conteo real de ítems relevantes por usuario en todo el set de ranking
     user_totals = df_preds.groupby("uid")["is_rel"].sum().rename("total_rel")
     user_metrics = user_metrics.join(user_totals, how="right").fillna(0)
 
-    # Filtrar solo usuarios que tengan al menos 1 ítem relevante para evaluar
+    # Filtrar usuarios con al menos 1 ítem relevante
     valid_users_mask = user_metrics["total_rel"] > 0
     valid_metrics = user_metrics[valid_users_mask].copy()
 
     if len(valid_metrics) > 0:
-        # Precision divide por K, Recall divide por los relevantes posibles
         valid_metrics["precision"] = valid_metrics["hits"] / k
         valid_metrics["recall"] = valid_metrics["hits"] / valid_metrics["total_rel"]
 
-        # IDCG (vectorizado) para calcular NDCG
         ideal_hits = np.minimum(valid_metrics["total_rel"].astype(int), k)
         discounts = 1.0 / np.log2(np.arange(2, k + 2))
-        cum_idcg_pad = np.insert(np.cumsum(discounts), 0, 0.0)  # offset index 0
+        cum_idcg_pad = np.insert(np.cumsum(discounts), 0, 0.0)
         valid_metrics["idcg"] = cum_idcg_pad[ideal_hits]
 
         valid_metrics["ndcg"] = np.where(
             valid_metrics["idcg"] > 0, valid_metrics["dcg"] / valid_metrics["idcg"], 0.0
         )
 
-        # MAP
         valid_metrics["map"] = valid_metrics["ap_sum"] / ideal_hits
 
-        # Promedios finales
         mean_precision = valid_metrics["precision"].mean()
         mean_recall = valid_metrics["recall"].mean()
         mean_ndcg = valid_metrics["ndcg"].mean()
@@ -79,22 +79,20 @@ def calculate_metrics(
     else:
         mean_precision = mean_recall = mean_ndcg = mean_map = 0.0
 
-    # 6. Novelty (basado en el modelo de entrenamiento, no en el testset)
+    # 6. Novelty
     trainset = model.trainset
     n_train_ratings = trainset.n_ratings
 
-    # Mapeo de popularidad cruda
     raw_to_count = {
         trainset.to_raw_iid(inner_iid): len(ur_list) for inner_iid, ur_list in trainset.ir.items()
     }
 
-    # Asignar 0.1 artificial a ítems desconocidos para evitar log(0)
     top_k_df["train_count"] = top_k_df["iid"].map(raw_to_count).fillna(0.1)
     top_k_df["prob"] = top_k_df["train_count"] / n_train_ratings
     top_k_df["self_info"] = -np.log2(top_k_df["prob"])
     novelty_val = top_k_df["self_info"].mean() if len(top_k_df) > 0 else 0.0
 
-    # 7. Diversity (Similitud del catálogo de Entrenamiento en Sparse)
+    # 7. Diversity
     rows, cols = [], []
     for inner_iid, ur_list in trainset.ir.items():
         for inner_uid, _ in ur_list:
@@ -112,18 +110,15 @@ def calculate_metrics(
 
     user_diversities = []
     for uid, group in top_k_df.groupby("uid"):
-        # Convertir IDs crudos de test a IDs internos de train
         inner_iids = [
             trainset.to_inner_iid(raw)
             for raw in group["iid"]
-            if trainset.knows_item(trainset.to_inner_iid(raw))
-            if raw in raw_to_count
+            if raw in raw_to_count and trainset.knows_item(trainset.to_inner_iid(raw))
         ]
 
         n_rec = len(inner_iids)
         if n_rec > 1:
             sub_mat = train_norm[inner_iids, :]
-            # El producto cruzado de KxK ítems es diminuto, toarray() aquí es seguro
             sim_matrix = (sub_mat @ sub_mat.T).toarray()
             upper_tri = sim_matrix[np.triu_indices(n_rec, k=1)]
             user_diversities.append(1.0 - float(np.mean(upper_tri)))
@@ -134,6 +129,7 @@ def calculate_metrics(
 
     return {
         "RMSE": round(rmse_val, 4),
+        "MAE": round(mae_val, 4),
         f"Recall@{k}": round(float(mean_recall), 4),
         f"Precision@{k}": round(float(mean_precision), 4),
         f"NDCG@{k}": round(float(mean_ndcg), 4),
