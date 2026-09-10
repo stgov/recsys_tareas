@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12, <=3.14"
 dependencies = [
+    "deepctr-torch>=0.3.0",
     "implicit>=0.7.3",
     "ipython>=9.16.1",
     "jupyter>=1.1.1",
