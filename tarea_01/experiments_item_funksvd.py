@@ -1,378 +1,369 @@
-"""Run ItemKNN and FunkSVD experiments for Tarea 1.
+"""Experimentos únicos para los notebooks originales de ItemKNN y FunkSVD.
 
-This script is meant to be the reproducible backbone for our part of the
-collaborative work. It trains on ``train.csv`` and reports every metric on
-``validation.csv``, as required by the assignment.
+Se usa TODO train y TODO validation. La selección sobre validation es
+exploratoria y no constituye una evaluación sobre un test independiente.
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
+import hashlib
+import importlib.metadata
+import json
+import platform
 from itertools import product
 from pathlib import Path
-from typing import Any
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
 import surprise
-from surprise import accuracy
+
+from tarea_01.evaluation import evaluate_model, prepare_evaluation
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from tarea_01.utils import calculate_metrics  # noqa: E402
+DATASET_DIR = PROJECT_ROOT / "tarea_01" / "dataset"
+OUTPUT_DIR = PROJECT_ROOT / "tarea_01" / "informe_assets" / "data"
 
 
-def parse_optional_int(value: str) -> int | None:
-    normalized = value.strip().lower()
-    if normalized in {"none", "null", "full", "all"}:
-        return None
-    return int(value)
+def parse_optional_int(value):
+    return None if value.lower() in {"none", "null", "full", "all"} else int(value)
 
 
-def parse_bool(value: str) -> bool:
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "y"}:
+def parse_bool(value):
+    if value.lower() in {"1", "true", "yes"}:
         return True
-    if normalized in {"0", "false", "no", "n"}:
+    if value.lower() in {"0", "false", "no"}:
         return False
-    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
+    raise argparse.ArgumentTypeError(f"Booleano no válido: {value}")
 
 
-def load_data(dataset_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    train_df = pd.read_csv(dataset_dir / "train.csv")
-    validation_df = pd.read_csv(dataset_dir / "validation.csv")
-    return train_df, validation_df
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
 
 
-def build_surprise_sets(
-    train_df: pd.DataFrame,
-    validation_df: pd.DataFrame,
-) -> tuple[surprise.Trainset, list[tuple[Any, Any, float]]]:
-    reader = surprise.Reader(rating_scale=(0, 5))
-    train_data = surprise.Dataset.load_from_df(
-        train_df[["user_id", "recipe_id", "rating"]],
-        reader=reader,
+def load_data(dataset_dir=DATASET_DIR):
+    return pd.read_csv(dataset_dir / "train.csv"), pd.read_csv(dataset_dir / "validation.csv")
+
+
+def build_surprise_sets(train_df, validation_df):
+    data = surprise.Dataset.load_from_df(
+        train_df[["user_id", "recipe_id", "rating"]], surprise.Reader(rating_scale=(0, 5))
     )
-    validation_data = surprise.Dataset.load_from_df(
-        validation_df[["user_id", "recipe_id", "rating"]],
-        reader=reader,
-    )
-    trainset = train_data.build_full_trainset()
-    testset = validation_data.construct_testset(validation_data.raw_ratings)
-    return trainset, testset
-
-
-def build_ranking_testset(
-    train_df: pd.DataFrame,
-    validation_df: pd.DataFrame,
-    n_negatives: int | None,
-    seed: int,
-) -> list[tuple[int, int, float]]:
-    """Build validation positives plus sampled negatives for Top-K evaluation.
-
-    The shared ``calculate_metrics`` ranks only the items present in the
-    provided testset. To avoid evaluating Top-K over validation positives only,
-    we add unseen training-catalog items as artificial negatives with rating 0.
-    """
-    ranking_testset = [
-        (int(row.user_id), int(row.recipe_id), float(row.rating))
-        for row in validation_df[["user_id", "recipe_id", "rating"]].itertuples(index=False)
-    ]
-
-    rng = np.random.default_rng(seed)
-    catalog_items = np.array(sorted(map(int, train_df["recipe_id"].unique())), dtype=int)
-    train_user_items = train_df.groupby("user_id")["recipe_id"].apply(
-        lambda values: set(map(int, values))
-    )
-    validation_user_items = validation_df.groupby("user_id")["recipe_id"].apply(
-        lambda values: set(map(int, values))
+    return data.build_full_trainset(), list(
+        validation_df[["user_id", "recipe_id", "rating"]].itertuples(index=False, name=None)
     )
 
-    if n_negatives is None:
-        print("Building full ranking candidate set; this can be slow and memory intensive.")
 
-    for user_id, validation_items in validation_user_items.items():
-        seen_items = train_user_items.get(user_id, set()).union(validation_items)
-        candidate_negatives = [
-            item_id for item_id in catalog_items if int(item_id) not in seen_items
-        ]
-        if n_negatives is None:
-            sampled_negatives = candidate_negatives
-        else:
-            sample_size = min(n_negatives, len(candidate_negatives))
-            sampled_negatives = (
-                rng.choice(
-                    np.array(candidate_negatives, dtype=int),
-                    size=sample_size,
-                    replace=False,
-                ).tolist()
-                if sample_size > 0
-                else []
-            )
-
-        ranking_testset.extend((int(user_id), int(item_id), 0.0) for item_id in sampled_negatives)
-
-    return ranking_testset
-
-
-def prediction_metrics(
-    model: surprise.AlgoBase,
-    testset: list[tuple[Any, Any, float]],
-) -> dict[str, float]:
-    predictions = model.test(testset)
-    return {
-        "RMSE": round(float(accuracy.rmse(predictions, verbose=False)), 4),
-        "MAE": round(float(accuracy.mae(predictions, verbose=False)), 4),
-    }
-
-
-def train_item_knn(
-    trainset: surprise.Trainset,
-    k: int,
-    min_k: int,
-    sim_name: str,
-) -> surprise.KNNBasic:
-    model = surprise.KNNBasic(
-        k=k,
-        min_k=min_k,
-        sim_options={"name": sim_name, "user_based": False},
-        verbose=False,
-    )
-    model.fit(trainset)
-    return model
+def train_item_knn(trainset, k=80, min_k=1, sim_name="msd"):
+    return surprise.KNNBasic(
+        k=k, min_k=min_k, sim_options={"name": sim_name, "user_based": False}, verbose=False
+    ).fit(trainset)
 
 
 def train_funksvd(
-    trainset: surprise.Trainset,
-    n_factors: int,
-    n_epochs: int,
-    lr_all: float,
-    reg_all: float,
-    biased: bool,
-    random_state: int,
-) -> surprise.SVD:
-    model = surprise.SVD(
+    trainset, n_factors=20, n_epochs=30, lr_all=0.003, reg_all=0.05, biased=True, random_state=42
+):
+    return surprise.SVD(
         n_factors=n_factors,
         n_epochs=n_epochs,
         lr_all=lr_all,
         reg_all=reg_all,
         biased=biased,
         random_state=random_state,
-    )
-    model.fit(trainset)
-    return model
+    ).fit(trainset)
 
 
-def maybe_limit_ranking_users(validation_df: pd.DataFrame, max_users: int | None) -> pd.DataFrame:
-    if max_users is None:
-        return validation_df
-    selected_users = validation_df["user_id"].drop_duplicates().head(max_users)
-    return validation_df.loc[validation_df["user_id"].isin(selected_users)].copy()
+def prediction_metrics(model, testset):
+    predictions = model.test(testset)
+    return {
+        "RMSE": float(surprise.accuracy.rmse(predictions, verbose=False)),
+        "MAE": float(surprise.accuracy.mae(predictions, verbose=False)),
+        "RatingFallbackFraction": float(
+            np.mean([p.details["was_impossible"] for p in predictions])
+        ),
+    }
 
 
-def model_key(row: dict[str, Any]) -> tuple[Any, ...]:
+def configuration_id(row):
     if row["method"] == "ItemKNN":
-        return (row["method"], row["k_neighbors"], row["min_k"], row["similarity"])
+        return f"item_{row['similarity']}_k{row['k_neighbors']}_min{row['min_k']}"
     return (
-        row["method"],
-        row["n_factors"],
-        row["n_epochs"],
-        row["lr_all"],
-        row["reg_all"],
-        row["biased"],
+        f"funk_f{row['n_factors']}_lr{row['lr_all']}_reg{row['reg_all']}"
+        f"_bias{int(row['biased'])}_e{row['n_epochs']}_s{row['random_state']}"
     )
 
 
-def run_experiments(args: argparse.Namespace) -> None:
-    train_df, validation_df = load_data(args.dataset_dir)
+def artifact_manifest(dataset_dir, parameters):
+    sources = [dataset_dir / n for n in ("train.csv", "validation.csv", "item_metadata.csv")]
+    sources += [Path(__file__), Path(__file__).with_name("evaluation.py")]
+    return {
+        "parameters": parameters,
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "packages": {
+            n: importlib.metadata.version(n)
+            for n in ("numpy", "pandas", "scikit-surprise", "scipy", "matplotlib", "nbconvert")
+        },
+        "sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},
+        "selection": "Exploratory minimum validation RMSE; ranking optimum shown separately.",
+    }
+
+
+def run_family(
+    method,
+    dataset_dir=None,
+    output_dir=None,
+    *,
+    item_k_values=(10, 30, 50, 80),
+    item_sims=("pearson", "msd"),
+    item_min_k_values=(1,),
+    funk_factors=(20, 50, 100),
+    funk_lr_all_values=(0.003, 0.005),
+    funk_reg_all_values=(0.02, 0.05),
+    funk_biased_values=(True,),
+    funk_epochs=30,
+    random_state=42,
+    ranking_negatives=100,
+    top_k=10,
+    relevance_threshold=4.0,
+    skip_ranking=False,
+    rank_all_configs=True,
+):
+    """Guarda grilla, ganadores, predicciones y procedencia; sin redondear selección.
+
+    Se calcula cada similitud solo una vez, variando k durante la agregación.
+    Evita conservar una matriz de similitud por configuración.
+    """
+    if method not in {"ItemKNN", "FunkSVD"}:
+        raise ValueError("method debe ser ItemKNN o FunkSVD")
+    dataset_dir, output_dir = Path(dataset_dir or DATASET_DIR), Path(output_dir or OUTPUT_DIR)
+    train_df, validation_df = load_data(dataset_dir)
+    metadata_df = pd.read_csv(dataset_dir / "item_metadata.csv")
     trainset, testset = build_surprise_sets(train_df, validation_df)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-
-    item_rows: list[dict[str, Any]] = []
-    trained_models: dict[tuple[Any, ...], surprise.AlgoBase] = {}
-    best_item: tuple[str, surprise.AlgoBase, dict[str, Any]] | None = None
-
-    if not args.item_k_values:
-        raise ValueError("item_k_values must include at least one value.")
-    if not args.funk_factors:
-        raise ValueError("funk_factors must include at least one value.")
-
-    for k, min_k, sim_name in product(args.item_k_values, args.item_min_k_values, args.item_sims):
-        row = {
-            "method": "ItemKNN",
-            "k_neighbors": k,
-            "min_k": min_k,
-            "similarity": sim_name,
-        }
-        try:
-            model = train_item_knn(trainset, k=k, min_k=min_k, sim_name=sim_name)
-            metrics = prediction_metrics(model, testset)
-        except Exception as exc:
-            row.update(
-                {
-                    "status": "failed",
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "RMSE": None,
-                    "MAE": None,
-                }
-            )
-            print(f"ItemKNN failed for k={k}, min_k={min_k}, sim={sim_name}: {exc}")
-            item_rows.append(row)
-            continue
-
-        row.update({"status": "ok", "error": None, **metrics})
-        item_rows.append(row)
-        trained_models[model_key(row)] = model
-        if best_item is None or row["RMSE"] < best_item[2]["RMSE"]:
-            best_item = ("ItemKNN", model, row)
-
-    item_results = pd.DataFrame(item_rows)
-    item_results.to_csv(args.output_dir / "item_based_sensitivity.csv", index=False)
-
-    funk_rows: list[dict[str, Any]] = []
-    best_funk: tuple[str, surprise.AlgoBase, dict[str, Any]] | None = None
-
-    funk_grid = product(
-        args.funk_factors,
-        args.funk_lr_all_values,
-        args.funk_reg_all_values,
-        args.funk_biased_values,
+    context = (
+        None
+        if skip_ranking
+        else prepare_evaluation(
+            train_df,
+            validation_df,
+            metadata_df,
+            k=top_k,
+            threshold=relevance_threshold,
+            n_negatives=ranking_negatives,
+            seed=random_state,
+        )
     )
-    for n_factors, lr_all, reg_all, biased in funk_grid:
-        row = {
-            "method": "FunkSVD",
-            "n_factors": n_factors,
-            "n_epochs": args.funk_epochs,
-            "lr_all": lr_all,
-            "reg_all": reg_all,
-            "biased": biased,
-        }
-        try:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if method == "ItemKNN":
+        configurations = [
+            dict(
+                method=method,
+                k_neighbors=k,
+                min_k=minimum,
+                similarity=sim,
+                random_state=random_state,
+            )
+            for sim, minimum, k in product(item_sims, item_min_k_values, item_k_values)
+        ]
+    else:
+        configurations = [
+            dict(
+                method=method,
+                n_factors=f,
+                n_epochs=funk_epochs,
+                lr_all=lr,
+                reg_all=reg,
+                biased=bias,
+                random_state=random_state,
+            )
+            for f, lr, reg, bias in product(
+                funk_factors, funk_lr_all_values, funk_reg_all_values, funk_biased_values
+            )
+        ]
+    if not configurations:
+        raise ValueError("La grilla no puede estar vacía")
+    rows, ranked = [], []
+    best_model = best_row = best_result = best_ranking_result = best_ranking_row = None
+    previous_similarity, model = None, None
+    for config in configurations:
+        start = perf_counter()
+        config["config_id"] = configuration_id(config)
+        if method == "ItemKNN":
+            similarity_key = config["similarity"], config["min_k"]
+            if similarity_key != previous_similarity:
+                model = train_item_knn(
+                    trainset,
+                    k=config["k_neighbors"],
+                    min_k=config["min_k"],
+                    sim_name=config["similarity"],
+                )
+                previous_similarity = similarity_key
+            model.k = config["k_neighbors"]
+        else:
             model = train_funksvd(
                 trainset,
-                n_factors=n_factors,
-                n_epochs=args.funk_epochs,
-                lr_all=lr_all,
-                reg_all=reg_all,
-                biased=biased,
-                random_state=args.random_state,
+                **{
+                    key: config[key]
+                    for key in (
+                        "n_factors",
+                        "n_epochs",
+                        "lr_all",
+                        "reg_all",
+                        "biased",
+                        "random_state",
+                    )
+                },
             )
+        fit_seconds = perf_counter() - start
+        result = None
+        if rank_all_configs and not skip_ranking:
+            result = evaluate_model(model, context=context)
+            metrics = result.metrics
+            ranked.append({**config, **metrics})
+        else:
             metrics = prediction_metrics(model, testset)
-        except Exception as exc:
-            row.update(
-                {
-                    "status": "failed",
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "RMSE": None,
-                    "MAE": None,
-                }
+        row = {
+            **config,
+            **metrics,
+            "FitSeconds": fit_seconds,
+            "EvaluationSeconds": perf_counter() - start - fit_seconds,
+            "status": "ok",
+        }
+        rows.append(row)
+        if best_row is None or row["RMSE"] < best_row["RMSE"]:
+            best_row, best_result = row.copy(), result
+            best_model = model if method == "FunkSVD" else None
+        if result is not None and (
+            best_ranking_row is None or row[f"NDCG@{top_k}"] > best_ranking_row[f"NDCG@{top_k}"]
+        ):
+            best_ranking_row, best_ranking_result = row.copy(), result
+        print(f"{config['config_id']}: RMSE={row['RMSE']:.6f}, MAE={row['MAE']:.6f}", flush=True)
+
+    if not skip_ranking and best_result is None:
+        if method == "ItemKNN":
+            best_model = train_item_knn(
+                trainset, best_row["k_neighbors"], best_row["min_k"], best_row["similarity"]
             )
-            print(
-                "FunkSVD failed for "
-                f"factors={n_factors}, lr={lr_all}, reg={reg_all}, biased={biased}: {exc}"
+        best_result = evaluate_model(best_model, context=context)
+        ranked.append({**best_row, **best_result.metrics})
+
+    sensitivity = pd.DataFrame(rows)
+    sensitivity["is_selected_rmse"] = sensitivity.config_id == best_row["config_id"]
+    sensitivity["is_selected_mae"] = (
+        sensitivity.config_id == sensitivity.loc[sensitivity.MAE.idxmin(), "config_id"]
+    )
+    if best_ranking_row is not None:
+        sensitivity["is_selected_ndcg"] = sensitivity.config_id == best_ranking_row["config_id"]
+    stem = "item_based" if method == "ItemKNN" else "funksvd"
+    prefix = "itemknn" if method == "ItemKNN" else "funksvd"
+    sensitivity.to_csv(output_dir / f"{stem}_sensitivity.csv", index=False)
+    ranking = pd.DataFrame(ranked)
+    if not skip_ranking:
+        ranking["is_selected_rmse"] = ranking.config_id == best_row["config_id"]
+        if best_ranking_row is not None:
+            ranking["is_selected_ndcg"] = ranking.config_id == best_ranking_row["config_id"]
+        ranking.to_csv(output_dir / f"{prefix}_ranking_sensitivity.csv", index=False)
+        ranking.loc[ranking.is_selected_rmse].to_csv(
+            output_dir / f"{prefix}_ranking_metrics.csv", index=False
+        )
+        best_result.export(output_dir, prefix=f"{prefix}_selected")
+        if best_ranking_result is not None:
+            best_ranking_result.export(output_dir, prefix=f"{prefix}_best_ndcg")
+    parameters = {
+        "method": method,
+        "configurations": configurations,
+        "ranking_negatives": ranking_negatives,
+        "random_state": random_state,
+        "threshold": relevance_threshold,
+        "top_k": top_k,
+        "skip_ranking": skip_ranking,
+        "rank_all_configs": rank_all_configs,
+    }
+    manifest = artifact_manifest(dataset_dir, parameters)
+    manifest["selected_rmse"], manifest["selected_ndcg"] = best_row, best_ranking_row
+    if best_result is not None:
+        manifest["protocol"] = best_result.protocol
+    (output_dir / f"{prefix}_manifest.json").write_text(
+        json.dumps(
+            _json_safe(manifest),
+            ensure_ascii=False,
+            indent=2,
+            allow_nan=False,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    combine_results(output_dir)
+    return {
+        "sensitivity": sensitivity,
+        "ranking": ranking,
+        "selection": pd.DataFrame([best_row]),
+        "evaluation": best_result,
+    }
+
+
+def combine_results(output_dir=OUTPUT_DIR):
+    """Consolida artefactos de la nueva carpeta; no lee resultados históricos."""
+    output_dir = Path(output_dir)
+    mappings = [
+        (
+            ["item_based_sensitivity.csv", "funksvd_sensitivity.csv"],
+            "item_funksvd_prediction_metrics.csv",
+        ),
+        (
+            ["itemknn_ranking_metrics.csv", "funksvd_ranking_metrics.csv"],
+            "item_funksvd_ranking_metrics.csv",
+        ),
+        (
+            ["itemknn_ranking_sensitivity.csv", "funksvd_ranking_sensitivity.csv"],
+            "item_funksvd_ranking_sensitivity.csv",
+        ),
+    ]
+    for names, output in mappings:
+        paths = [output_dir / name for name in names]
+        if all(path.exists() for path in paths):
+            pd.concat([pd.read_csv(path) for path in paths], ignore_index=True).to_csv(
+                output_dir / output, index=False
             )
-            funk_rows.append(row)
-            continue
-
-        row.update({"status": "ok", "error": None, **metrics})
-        funk_rows.append(row)
-        trained_models[model_key(row)] = model
-        if best_funk is None or row["RMSE"] < best_funk[2]["RMSE"]:
-            best_funk = ("FunkSVD", model, row)
-
-    funk_results = pd.DataFrame(funk_rows)
-    funk_results.to_csv(args.output_dir / "funksvd_sensitivity.csv", index=False)
-
-    print("\nItemKNN sensitivity")
-    print(item_results.to_string(index=False))
-    print("\nFunkSVD sensitivity")
-    print(funk_results.to_string(index=False))
-
-    prediction_results = pd.concat([item_results, funk_results], ignore_index=True, sort=False)
-    prediction_results.to_csv(args.output_dir / "item_funksvd_prediction_metrics.csv", index=False)
-
-    if args.skip_ranking:
-        return
-
-    if best_item is None or best_funk is None:
-        raise ValueError("Both item_k_values and funk_factors must include at least one value.")
-
-    ranking_validation_df = maybe_limit_ranking_users(validation_df, args.max_ranking_users)
-    ranking_testset = build_ranking_testset(
-        train_df=train_df,
-        validation_df=ranking_validation_df,
-        n_negatives=args.ranking_negatives,
-        seed=args.random_state,
-    )
-    ranking_rows: list[dict[str, Any]] = []
-    candidate_mode = (
-        "full_catalog"
-        if args.ranking_negatives is None
-        else f"negative_sample_{args.ranking_negatives}"
-    )
-
-    configs_to_rank = [best_item, best_funk]
-    selected_by = "lowest_validation_rmse"
-    if args.rank_all_configs:
-        configs_to_rank = [
-            (row["method"], trained_models[model_key(row)], row)
-            for row in [*item_rows, *funk_rows]
-            if row.get("status") == "ok"
-        ]
-        selected_by = "all_configs"
-
-    for method_name, model, base_row in configs_to_rank:
-        ranking_metrics = calculate_metrics(
-            model=model,
-            testset=ranking_testset,
-            k=args.top_k,
-            threshold=args.relevance_threshold,
-        )
-        ranking_set_rmse = ranking_metrics.pop("RMSE")
-        ranking_rows.append(
-            {
-                "method": method_name,
-                "selected_by": selected_by,
-                "ranking_candidate_mode": candidate_mode,
-                "ranking_users": ranking_validation_df["user_id"].nunique(),
-                "RankingSetRMSE": ranking_set_rmse,
-                **base_row,
-                **ranking_metrics,
-            }
-        )
-
-    ranking_results = pd.DataFrame(ranking_rows)
-    ranking_results.to_csv(args.output_dir / "item_funksvd_ranking_metrics.csv", index=False)
-    print("\nRanking metrics for best model of each family")
-    print(ranking_results.to_string(index=False))
 
 
-def build_parser() -> argparse.ArgumentParser:
+def run_experiments(args):
+    kwargs = vars(args).copy()
+    for family in kwargs.pop("families"):
+        run_family(family, **kwargs)
+
+
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset-dir", type=Path, default=PROJECT_ROOT / "tarea_01" / "dataset")
-    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "tarea_01" / "results")
-    parser.add_argument("--item-k-values", type=int, nargs="+", default=[10, 30, 50])
+    parser.add_argument(
+        "--families", nargs="+", choices=["ItemKNN", "FunkSVD"], default=["ItemKNN", "FunkSVD"]
+    )
+    parser.add_argument("--dataset-dir", type=Path, default=DATASET_DIR)
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    parser.add_argument("--item-k-values", type=int, nargs="+", default=[10, 30, 50, 80])
     parser.add_argument("--item-min-k-values", type=int, nargs="+", default=[1])
     parser.add_argument(
-        "--item-sims",
-        nargs="+",
-        default=["pearson"],
-        choices=["cosine", "msd", "pearson"],
+        "--item-sims", nargs="+", choices=["pearson", "msd", "cosine"], default=["pearson", "msd"]
     )
     parser.add_argument("--funk-factors", type=int, nargs="+", default=[20, 50, 100])
     parser.add_argument("--funk-epochs", type=int, default=30)
-    parser.add_argument("--funk-lr-all-values", type=float, nargs="+", default=[0.005])
-    parser.add_argument("--funk-reg-all-values", type=float, nargs="+", default=[0.02])
+    parser.add_argument("--funk-lr-all-values", type=float, nargs="+", default=[0.003, 0.005])
+    parser.add_argument("--funk-reg-all-values", type=float, nargs="+", default=[0.02, 0.05])
     parser.add_argument("--funk-biased-values", type=parse_bool, nargs="+", default=[True])
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--relevance-threshold", type=float, default=4.0)
-    parser.add_argument("--ranking-negatives", type=parse_optional_int, default=500)
-    parser.add_argument("--max-ranking-users", type=int, default=None)
+    parser.add_argument("--ranking-negatives", type=parse_optional_int, default=100)
     parser.add_argument("--random-state", type=int, default=42)
-    parser.add_argument("--rank-all-configs", action="store_true")
+    parser.add_argument("--rank-all-configs", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--skip-ranking", action="store_true")
     return parser
 

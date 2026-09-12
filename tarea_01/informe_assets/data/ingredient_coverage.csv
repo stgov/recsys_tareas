@@ -1,0 +1,4 @@
+min_df,vocabulary,recipes,min_ingredients,recipes_with_min_ingredients,coverage_fraction,orphan_recipes,orphan_fraction,mean_ingredients,p10_ingredients,p25_ingredients,median_ingredients,p75_ingredients
+1,3869,7047,3,6941,0.9849581382148432,0,0.0,8.4450120618703,4.0,6.0,8.0,11.0
+5,1214,7047,3,6748,0.9575705974173407,9,0.001277139208173691,7.8088548318433375,4.0,5.0,7.0,10.0
+10,713,7047,3,6574,0.9328792393926494,40,0.005676174258549737,7.337732368383709,3.0,5.0,7.0,10.0

@@ -1,0 +1,25 @@
+# Lista blanca de evidencia tabular compacta.
+*
+!.gitignore
+!all_methods_metrics.csv
+!all_methods_protocol.json
+!all_methods_selection.json
+!als_sensitivity.csv
+!als_vs_mostpopular_bootstrap.json
+!bpr_sensitivity.csv
+!content_based_sensitivity.csv
+!eda_split_summary.csv
+!eda_summary.json
+!ingredient_coverage.csv
+!metadata_minutes_review.csv
+!rating_distribution.csv
+!top_popular_recipes.csv
+!top_rated_recipes_min10.csv
+!user_based_sensitivity.csv
+!userknn_ranking_metrics.csv
+!userknn_selection.json
+!item_based_sensitivity.csv
+!itemknn_manifest.json
+!funksvd_sensitivity.csv
+!funksvd_manifest.json
+!item_funksvd_ranking_sensitivity.csv

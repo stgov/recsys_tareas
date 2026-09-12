@@ -1,0 +1,25 @@
+{
+  "comparison": "ALS minus MostPopular",
+  "scope": "fixed validation users and selected configurations",
+  "limitation": "does not include seed or hyperparameter-selection uncertainty",
+  "metrics": {
+    "NDCG@10": {
+      "metric": "NDCG@10",
+      "difference_first_minus_second": -0.004831489607553503,
+      "ci95_low": -0.01184577450220216,
+      "ci95_high": 0.002271813755138369,
+      "users": 4391,
+      "n_resamples": 5000,
+      "seed": 42
+    },
+    "Recall@10": {
+      "metric": "Recall@10",
+      "difference_first_minus_second": -0.009509569244903272,
+      "ci95_low": -0.01839068344062722,
+      "ci95_high": -0.0005927132067861173,
+      "users": 4391,
+      "n_resamples": 5000,
+      "seed": 42
+    }
+  }
+}
