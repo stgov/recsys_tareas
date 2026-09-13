@@ -2,6 +2,10 @@
 
 **Curso:** IIC3633 Sistemas Recomendadores, 2026-2
 
+**Equipo:** Grupo 18 (eight nine)
+
+**Integrantes:** Jorge Cartagena, Santiago Valenzuela
+
 ## Resumen
 
 Se analizaron 157.108 interacciones de entrenamiento entre 4.594 usuarios y
@@ -309,6 +313,9 @@ familia ItemKNN.
 
 ![Novedad y cobertura](informe_assets/ranking_discovery.png)
 
+En ambos paneles, la flecha ↑ indica que un valor mayor representa más novedad
+o cobertura.
+
 MostPopular obtiene la menor novedad (11,04 bits por ítem) y solo 16,16 % de
 cobertura, coherente con recomendar la cabeza. ItemKNN y BPR cubren 96,71 % y
 97,18 % bajo el muestreo; ALS cubre 84,26 %, Content-Based 62,78 % y Random
@@ -317,6 +324,8 @@ aleatorias casi todo el catálogo puede aparecer, aunque cada usuario solo vea
 alrededor de 106 candidatos.
 
 ![Diversidad de tags y disimilitud colaborativa](informe_assets/ranking_diversity.png)
+
+En ambos paneles, la flecha ↑ indica mayor diversidad.
 
 Los Top-10 contienen alrededor de 80–92 tags distintos y la ILD se concentra
 entre 0,957 y 0,989. El conteo tan alto revela que tags mezcla cocina, dieta,
@@ -330,6 +339,10 @@ definirse una taxonomía antes de recalcular.
 ### 5.1 ItemKNN: k solicitado no es k efectivo
 
 ![Sensibilidad de error de ItemKNN](informe_assets/itemknn_sensitivity.png)
+
+Para facilitar la lectura, la figura muestra solo MSD, la similitud que domina
+RMSE y MAE. Pearson permanece en las tablas de sensibilidad y en el diagnóstico
+de vecinos y fallback, donde ayuda a explicar su fragilidad.
 
 MSD domina a Pearson en RMSE y MAE para todo k probado. Con MSD, aumentar k de
 10 a 80 reduce RMSE de 0,9269 a 0,9108 (1,74 %), pero casi toda la ganancia

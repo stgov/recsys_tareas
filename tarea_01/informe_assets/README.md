@@ -1,5 +1,9 @@
 # Artefactos del informe
 
+**Equipo:** Grupo 18 (eight nine)
+
+**Integrantes:** Jorge Cartagena y Santiago Valenzuela
+
 Esta carpeta contiene únicamente evidencia compacta destinada a la entrega:
 
 - PNG usados por el informe y PDF vectoriales equivalentes;
@@ -13,4 +17,6 @@ los resultados de prueba de `tarea_01/results/` tampoco forman parte de la
 entrega.
 
 La lista versionable está definida explícitamente en `.gitignore`. Para
-regenerar los artefactos, siga el orden documentado en `tarea_01/README.md`.
+regenerar los artefactos, siga el orden documentado en
+[`tarea_01/README.md`](../README.md). Estos archivos respaldan el informe; no
+reemplazan los notebooks ni el PDF final.

@@ -1,0 +1,53 @@
+{
+  "submitted": false,
+  "official_scoring_page": "https://contest-recsys.vercel.app/scoring",
+  "templates": {
+    "rating_rows": 2695,
+    "ranking_users": 1659
+  },
+  "rating": {
+    "file": "competicion_rating_completado.csv",
+    "model": "0.5 * BaselineOnly + 0.5 * FunkSVD",
+    "fit_split": "train.csv + validation.csv; only ratings in [1, 5]",
+    "clip": [
+      1,
+      5
+    ],
+    "development_evidence": {
+      "validation_ratings_1_to_5": {
+        "RMSE": 0.5423282770449164,
+        "MAE": 0.34433790481714843,
+        "observations": 26788
+      },
+      "last_validation_rating_per_target_user": {
+        "RMSE": 0.6255176625574702,
+        "MAE": 0.3805192018691625,
+        "observations": 2560
+      }
+    }
+  },
+  "ranking": {
+    "file": "competicion_ranking.json",
+    "model": "0.5 * ALS implicit + 0.5 * time-decayed popularity",
+    "fit_split": "train.csv + validation.csv",
+    "positive_threshold": 4,
+    "candidates": "full known catalog excluding train + validation history",
+    "top_k": 10,
+    "tie_break": "score descending, recipe_id ascending",
+    "development_evidence": {
+      "NDCG@10": 0.032393916427924774,
+      "Recall@10": 0.03401823524328062,
+      "users_with_validation_ground_truth": 1653
+    }
+  },
+  "source_sha256": {
+    "train.csv": "50723c95441bcf3133ea68888f797b4b83259f56df62e8949388c84c4651e2d7",
+    "validation.csv": "3036769ce2aff0433f48d98648e2ffdd871d85c523a81598b3c1b6d44e195245",
+    "rating_template_fill.csv": "a6e265dec84224b3483ea4660af2ce27c37c8cd37bdc4623850971e3a40933eb",
+    "ranking_template_fill.json": "58ed8184e7a2172d3f4aaeb8c81baa470a49533b006c2c285faeec3952291927"
+  },
+  "output_sha256": {
+    "competicion_rating_completado.csv": "49306c6d2b1305f4142fdc4ba68e14cf61df9b3099d29dd06c3d0cdfef697e29",
+    "competicion_ranking.json": "84dbd3f98742ccb2b8cacfb5e91ac0e4fd8485b1ff6b1b4c07e771ebe13c79d8"
+  }
+}

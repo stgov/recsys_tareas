@@ -72,13 +72,21 @@ def _save_close(fig: plt.Figure, output_path: Path) -> None:
 def save_sensitivity_plot(df: pd.DataFrame, method: str, output_path: Path) -> None:
     """Dos paneles: RMSE/MAE con iguales configuraciones y mínimo señalado."""
     report_style()
+    plotted = df
+    scope_note = ""
     if method == "ItemKNN":
         x_col, xlabel, group_cols = "k_neighbors", "Vecinos máximos (k)", ["similarity", "min_k"]
+        selected_similarity = str(df.loc[df.RMSE.idxmin(), "similarity"])
+        plotted = df.loc[df.similarity.eq(selected_similarity)].copy()
+        scope_note = (
+            f"Solo se muestra {selected_similarity.upper()}; "
+            "Pearson se conserva en tablas y diagnósticos"
+        )
     else:
         x_col, xlabel = "n_factors", "Factores latentes"
         group_cols = ["lr_all", "reg_all", "biased"]
     fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.5), layout="constrained")
-    for index, (values, group) in enumerate(df.groupby(group_cols, dropna=False, sort=True)):
+    for index, (values, group) in enumerate(plotted.groupby(group_cols, dropna=False, sort=True)):
         group = group.sort_values(x_col)
         if method == "ItemKNN":
             label = f"{str(values[0]).upper()} · min_k={int(values[1])}"
@@ -97,11 +105,11 @@ def save_sensitivity_plot(df: pd.DataFrame, method: str, output_path: Path) -> N
                 label=label,
             )
             ax.set(xlabel=xlabel, ylabel=metric, title=f"{metric} en validación ↓")
-            ax.set_xticks(sorted(df[x_col].unique()))
+            ax.set_xticks(sorted(plotted[x_col].unique()))
             ax.ticklabel_format(axis="y", style="plain", useOffset=False)
             ax.grid()
     for ax, metric in zip(axes, ["RMSE", "MAE"], strict=True):
-        best = df.loc[df[metric].idxmin()]
+        best = plotted.loc[plotted[metric].idxmin()]
         ax.scatter(
             [best[x_col]], [best[metric]], s=120, facecolors="none", edgecolors="#222222", zorder=5
         )
@@ -110,7 +118,8 @@ def save_sensitivity_plot(df: pd.DataFrame, method: str, output_path: Path) -> N
     fig.legend(handles, labels, loc="outside lower center", ncol=min(len(labels), 2), frameon=False)
     fig.suptitle(
         f"{method}: sensibilidad del error de ratings\n"
-        "Menor valor es mejor · Ejes verticales ampliados; no comienzan en cero",
+        "Menor valor es mejor · Ejes verticales ampliados; no comienzan en cero"
+        + (f"\n{scope_note}" if scope_note else ""),
         fontsize=12,
     )
     _save_close(fig, output_path)
@@ -300,8 +309,8 @@ def save_discovery_plot(df: pd.DataFrame, output_path: Path) -> None:
     _metric_panels(
         df,
         [
-            ("NoveltyBitsPerItem", "Novedad: bits por ítem", False),
-            ("CatalogCoverage", "Cobertura del catálogo de train", True),
+            ("NoveltyBitsPerItem", "Novedad: bits por ítem ↑", False),
+            ("CatalogCoverage", "Cobertura del catálogo de train ↑", True),
         ],
         "Descubrimiento y alcance del catálogo",
         output_path,
@@ -313,8 +322,8 @@ def save_diversity_plot(df: pd.DataFrame, output_path: Path) -> None:
     _metric_panels(
         df,
         [
-            ("TagDiversity", "Tags distintos por lista", False),
-            ("InteractionILD", "Disimilitud coseno de interacciones", False),
+            ("TagDiversity", "Tags distintos por lista ↑", False),
+            ("InteractionILD", "ILD de interacciones ↑", False),
         ],
         "Diversidad semántica y diversidad colaborativa",
         output_path,

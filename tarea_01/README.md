@@ -1,8 +1,14 @@
 # Tarea 1: recomendación de recetas
 
+**Equipo:** Grupo 18 (eight nine)
+
+**Integrantes:** Jorge Cartagena y Santiago Valenzuela
+
 Este directorio reúne el EDA, los experimentos y la evidencia usada por
 [`INFORME_BORRADOR.md`](INFORME_BORRADOR.md). El enunciado está en
 [`Tarea_1_RecSys_2026_2.pdf`](../Tarea_1_RecSys_2026_2.pdf).
+El registro y los enlaces de las sesiones de IA están centralizados en
+[`USO_IA.md`](USO_IA.md).
 
 Los notebooks originales del equipo se conservan en `notebooks/`; no se crearon
 copias alternativas. `utils.py` tampoco se modifica: la evaluación auditable se
@@ -22,6 +28,8 @@ encapsula en `evaluation.py` para no cambiar la API compartida.
 - `general_experiments.py`: UserKNN, baselines, ALS, BPR, Content-Based y consolidación.
 - `report_eda.py` y `plot_item_funksvd_results.py`: tablas y figuras del informe.
 - `informe_assets/`: figuras PNG/PDF y evidencia compacta versionable.
+- `USO_IA.md`: inventario de conversaciones de IA exigido por el enunciado.
+- `bonus_submission/`: archivos de competencia y su manifest de validación.
 
 `dataset/`, `results/` y `figures/` son ubicaciones locales o históricas
 ignoradas por Git. Las conclusiones nuevas deben usar solamente
